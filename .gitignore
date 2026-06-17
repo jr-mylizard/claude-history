@@ -1,0 +1,13 @@
+﻿# Only track memory files and conversation exports
+
+# Ignore everything by default
+*
+
+# Allow directory traversal
+!*/
+
+# Allow only memory markdown and conversation exports
+!projects/**/memory/
+!projects/**/memory/*.md
+!conversations/**/*.md
+!.gitignore

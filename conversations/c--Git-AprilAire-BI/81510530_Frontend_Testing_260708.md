@@ -131,3 +131,54 @@ Everything looks correct. Here's a summary of what was added across all 7 tests:
 - **7b (free)**: Adds a free app and asserts the expiry column was not touched. The InstallAppController dispatch assertion is `test.fixme` pending confirmation of the Mosyle operation name in `logging_api_calls`.
 
 New npm scripts: `test:integrity`, `test:add-app`, `test:mosyle` (runs all three Mosyle suites). New env vars documented in `.env.test.local.example`.
+
+---
+
+**You**
+
+Have you run all these tests already?  If not, what's the process to do that?
+
+---
+
+**Claude**
+
+No — I only ran a TypeScript compile check (`tsc --noEmit`), which came back clean on the new files. The actual tests haven't been executed.
+
+These aren't tests that can run without real hardware and credentials. Here's what you need to actually run each suite:
+
+**`test:cda` / `test:integrity` (Mosyle read/write tests)**
+
+These require:
+- `.env.test.local` populated with:
+  - `PLAYWRIGHT_TEST_IOS_DEVICE_ID` + `PLAYWRIGHT_TEST_IOS_UDID` (the test device)
+  - `MOSYLE_API_ACCESS_TOKEN`, `MOSYLE_USER_EMAIL`, `MOSYLE_USER_PASSWORD`
+  - `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`
+- The test device must be enrolled in Mosyle and in group 14
+- For `test:cda`: the device must have at least some apps with `allowed_in_mosyle = false` and a non-null category (so `pickTestApps()` can find something to work with)
+
+```powershell
+cd "c:\Git\MyLizard_NodeJS"
+npm run test:integrity    # ~30 seconds, read-only, safe to run any time
+npm run test:cda          # ~10-15 minutes, modifies DB schedule rows (cleaned up after)
+```
+
+**`test:add-app` (UI-driven, requires dev server)**
+
+Needs everything above plus:
+- Next.js dev server running (`npm run dev`)
+- `PLAYWRIGHT_TEST_PAID_IOS_APP_BUNDLE_ID` and/or `PLAYWRIGHT_TEST_FREE_IOS_APP_BUNDLE_ID`
+- `INTERNAL_USER` + `INTERNAL_PASSWORD`
+
+```powershell
+# Terminal 1
+npm run dev
+
+# Terminal 2
+npm run test:add-app
+```
+
+**What I'd recommend running first**
+
+Start with `test:integrity` — it's read-only, fast, and will immediately tell you if there are any existing integrity issues (stale CDA values, mobileconfig coverage gaps, badge mismatches). No risk of leaving the device in a bad state.
+
+`test:cda` is the expensive one (waits for two full sync cycles). Run it on its own when you have 15 minutes and aren't running anything else against Mosyle (rate-limit concern).

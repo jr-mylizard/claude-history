@@ -182,3 +182,90 @@ npm run test:add-app
 Start with `test:integrity` — it's read-only, fast, and will immediately tell you if there are any existing integrity issues (stale CDA values, mobileconfig coverage gaps, badge mismatches). No risk of leaving the device in a bad state.
 
 `test:cda` is the expensive one (waits for two full sync cycles). Run it on its own when you have 15 minutes and aren't running anything else against Mosyle (rate-limit concern).
+
+---
+
+**You**
+
+I don't see .env.test.local.  Should I rename .env.test.local.example and populate it?
+
+---
+
+**Claude**
+
+Yes — `.env.test.local.example` is just the template. The actual file Playwright loads is `.env.test.local`. Rename (or copy) it and fill in the real values:
+
+```powershell
+cd "c:\Git\MyLizard_NodeJS"
+Copy-Item .env.test.local.example .env.test.local
+```
+
+Then open `.env.test.local` and populate at minimum:
+
+```
+PLAYWRIGHT_TEST_IOS_DEVICE_ID=WI_608A_JR_001_P_001   # your test device_id
+PLAYWRIGHT_TEST_IOS_UDID=00008030-...                  # Mosyle UDID for the same device
+MOSYLE_API_ACCESS_TOKEN=...
+MOSYLE_USER_EMAIL=...
+MOSYLE_USER_PASSWORD=...
+```
+
+The Supabase vars (`NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) are already in `.env.local` and are loaded before `.env.test.local`, so you don't need to duplicate them unless you want to override (e.g., point at a different project for testing).
+
+Once that's set, `npm run test:integrity` is the safest first run — it only reads, takes ~30 seconds, and will immediately surface any existing issues.
+
+---
+
+**You**
+
+If I want an existing but unused device in the database synched with a test device in mosyle, do I just have to update its imei?
+
+---
+
+**Claude**
+
+Not quite — IMEI alone is enough for enrollment detection (the webhook matches on IMEI), but the sync cron needs more than that. Looking at `vw_desired_mosyle_cdas_state`, it uses `cd.mosyle_device_id` to know which Mosyle device to target when it calls `assign_custom_device_attributes`. If that's null or wrong, the CDA calls go nowhere.
+
+At minimum you'd need to set:
+
+| Column | What to put |
+|---|---|
+| `imei` | The physical device's IMEI |
+| `mdm_vendor` | `'mosyle'` |
+| `mosyle_device_id` | Mosyle's internal device ID (find it in the Mosyle console or via the API) |
+| `operating_system` | `'ios'` |
+| `enabled` | `true` |
+
+The `mosyle_device_id` is what the sync actually uses in API calls. The `PLAYWRIGHT_TEST_IOS_UDID` you'd put in `.env.test.local` is the Apple UDID (different from the Mosyle device ID) — that's what the Playwright helper uses to read back `CustomDeviceAttributes` from the device list endpoint.
+
+To get the Mosyle internal device ID for a device you can hit the API:
+```powershell
+# Quick lookup by serial number (already in getMosyleDeviceBySerial helper)
+# Or in the Mosyle console: Devices → click device → URL contains the device ID
+```
+
+If the existing DB device already has `mdm_vendor_device_id` set from a prior enrollment, check whether that's the same value as `mosyle_device_id` — they may or may not be the same column depending on the schema.
+
+---
+
+**You**
+
+I understand that mosyle_device_id is used in most api calls, but when picking up a new device that's not known.  sync-apps-and-websites should look for imeis that match what's in the database and pull their data.  Can you confirm it's not doing that?
+
+---
+
+**Claude**
+
+Let me read the sync function to check.
+
+---
+
+**Claude**
+
+It does exactly what you described. Step 1 (lines 48–95) specifically handles this:
+
+1. Queries `customer_devices` for rows where `mdm_vendor = 'mosyle'` AND `mosyle_device_id IS NULL` AND `imei IS NOT NULL`
+2. Fetches the full Mosyle device list once
+3. For each pending device, calls `completeIosEnrollment` which matches by IMEI against the Mosyle list and fills in `mosyle_device_id` and other metadata
+
+So your instinct is correct — **you just need to update the `imei`** on the existing DB device (and make sure `mdm_vendor = 'mosyle'` and `mosyle_device_id IS NULL`). The next cron tick (within 3 minutes) will detect it, match it against the Mosyle device list by IMEI, and run `completeIosEnrollment` to fill in everything else automatically.

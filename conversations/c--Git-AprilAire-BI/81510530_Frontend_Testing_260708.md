@@ -269,3 +269,137 @@ It does exactly what you described. Step 1 (lines 48–95) specifically handles 
 3. For each pending device, calls `completeIosEnrollment` which matches by IMEI against the Mosyle list and fills in `mosyle_device_id` and other metadata
 
 So your instinct is correct — **you just need to update the `imei`** on the existing DB device (and make sure `mdm_vendor = 'mosyle'` and `mosyle_device_id IS NULL`). The next cron tick (within 3 minutes) will detect it, match it against the Mosyle device list by IMEI, and run `completeIosEnrollment` to fill in everything else automatically.
+
+---
+
+**You**
+
+Look at tests/e2e/MOSYLE-TEST-BACKLOG.md and see if there are any tests we should add to our list.
+
+---
+
+**Claude**
+
+Several items in the backlog aren't covered yet. Here's the gap analysis:
+
+**What we've already built that covers backlog items:**
+- CDA round-trip enable/disable → `mosyle-cda-roundtrip.spec.ts`
+- Render-race regression (assert 5) → round-trip
+- Group membership safety (asserts 6/4R) → round-trip
+- CDA value integrity, slot format guard, mobileconfig coverage, badge reconciliation → `mosyle-integrity.spec.ts`
+- Add App paid/free basics → `add-app-contract.spec.ts`
+
+**Gaps — not yet implemented:**
+
+| Backlog item | Priority | What's missing |
+|---|---|---|
+| **Add App free — full contract** | P1 | Our test 7b only checks App Store expiry. Backlog adds: slot in 1–500 + unique per device; `cda_id` format in view; `mosyle_status` flips to `'added'` or `'not_found'` within ~10 min; idempotency (second add returns same slot, no second slot consumed); button-enable regression (assertion 0) |
+| **Add App paid — group 15 bouncing** | P1 | Assert device leaves "Block App Store" group (id 15) on next sync tick and re-joins after expiry; fast-forward test by setting the timer to `now()` |
+| **Add App paid — stored price path** | P1 | Re-add the same paid app on a second device and verify window opens without an iTunes refetch (catches the bug where paid detection only fired on first-ever fetch) |
+| **Tombstone canary** | P1 | After `mosyle_status = 'added'`, independently verify the app's track ID is in the Mosyle profile grid. Without this, DB says added but Mosyle grid disagrees (the MTZ Life case) silently |
+| **Removal flow** | P2 | Blocked on frontend — no remove-app control yet |
+| **Duplicate-assignment regression** | P2 | Needs profile recon endpoint — keep as manual for now |
+| **Badge states (UI)** | P2 | Seed `last_seen_on_device` + `last_audited_at` combos, assert four `InstallBadge` states render correctly |
+| **Audit reconciliation** | P2 | Assert `last_audited_at`, `last_seen_on_device` state after dispatching the audit workflow |
+| **Step-3 self-healing** | P3 | Simulate lost dispatch via counter/timestamp manipulation, verify re-dispatch and cap behavior |
+
+The highest-value thing not yet covered is the **tombstone canary** — that's the category of silent failure that's bitten you most. The **Add App free full contract** is also significant since the backlog notes the button-enable bug persisted five days unnoticed.
+
+Want me to start with either of those?
+
+---
+
+**You**
+
+Go ahead and do both.
+
+---
+
+**Claude**
+
+Let me read the profile manager script and any recon helpers to understand how to read the Mosyle profile grid.
+
+---
+
+**Claude**
+
+Let me also check the recon script to understand the profile grid API:
+
+---
+
+**Claude**
+
+Now I have a complete picture. The profile grid is only readable via the Mosyle web UI — there's no Business API equivalent. The tombstone check needs to log in to `mybusiness.mosyle.com` and read `.appselector_grid div.app[id]` elements. Let me build everything.
+
+---
+
+**Claude**
+
+Now create the Mosyle web UI helper:
+
+---
+
+**Claude**
+
+Now write the tombstone canary spec:
+
+---
+
+**Claude**
+
+Now replace test 7b in `add-app-contract.spec.ts` with the full free-app contract:
+
+---
+
+**Claude**
+
+Now replace the test 7b body with the full free-app contract:
+
+---
+
+**Claude**
+
+Now update package.json and the env example:
+
+---
+
+**Claude**
+
+Now run the TypeScript check:
+
+---
+
+**Claude**
+
+Only the pre-existing `admin-auth.spec.ts` error — all new files are clean.
+
+Here's what was built:
+
+---
+
+**`helpers/db.ts`** — 4 new helpers:
+- `getMosyleInstallProfileName(deviceId)` — reads `mosyle_install_profile_name` from `customer_devices`
+- `getIosDeviceAppsWithMosyleStatus(deviceId)` — returns all device apps with `mosyle_status`, `slot`, and catalog metadata
+- `getIosDeviceAppByPackageId(deviceId, packageId)` — looks up a specific app row by bundle ID
+- `waitForMosyleStatusSet(deviceAppRowId, maxMs)` — polls until `mosyle_status` is non-null, returns the value (or null if timed out)
+
+**`helpers/mosyle-web.ts`** — new file, TypeScript port of the relevant parts of `mosyle_profile_manager.py`:
+- `loginToMosyleWeb(page)` — email → Next → password → Enter → wait for dashboard
+- `navigateToInstallApp(page)` — clicks `#menu_gerenciamento`, finds "Install App" via JS
+- `getProfileGridTrackIds(page, profileName)` — full-page reload, opens profile, reads `.appselector_grid div.app[id]`, returns `Set<string>` of track IDs
+
+**`mosyle-tombstone.spec.ts`** — new test, 5 min timeout:
+- Gets profile name from DB
+- Finds all `mosyle_status = 'added'` rows for the device
+- Opens Mosyle web UI in a fresh isolated browser context
+- Reads the server-rendered profile grid
+- Fails on any `ios_apps.id` that's missing from the grid, with a precise error pointing to the silent-save class of failure and how to fix it
+
+**`add-app-contract.spec.ts` test 7b** — replaced with full free-app contract (20 min timeout):
+- **Assert 0**: button disabled before selection, disabled while typing, enabled only after a result is clicked (the regression that went unnoticed for 5 days)
+- **Assert 1**: `ios_device_apps` row created with `slot` in 1–500, unique across the device
+- **Assert 2**: `vw_desired_mosyle_cdas_state.cda_id = 'custom_AS' + slot.padStart(4, '0')`
+- **Assert 3**: if the app's category has an active schedule (`should_be_allowed = true`), the CDA is on the device (skipped if `PLAYWRIGHT_TEST_IOS_UDID` not set)
+- **Assert 4**: `app_store_should_be_enabled_until` unchanged
+- **Assert 5**: `mosyle_status` becomes `'added'` or `'not_found'` within 15 min — null at 15 min is an explicit failure
+- **Assert 6**: second add of the same app returns the same row ID and same slot

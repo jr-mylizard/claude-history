@@ -2195,3 +2195,148 @@ All three updates landed cleanly. Let me verify the final count matches the live
 - **active_apps = 387**, exactly matching the live Hexnode payload's app count. `total_rows = 453` (387 active + 66 soft-deleted, kept for history rather than hard-deleted).
 
 Database side is done. Still outstanding, whenever you're ready: reconnecting the Hexnode app group/policy (recall policy `WI_608A_SP_001_N_001` already exists as id 77 and is actively associated — someone got partway through before it stalled), and flipping `enabled` back to `true` once that's sorted.
+
+---
+
+**You**
+
+I've renamed the device for the device_id, and see that these policies are applied:
+
+App List Backup
+Default Android Compliance Policy
+ME_SM
+Require Hexnode Remote
+WI_608A_SP_001_N_001
+
+There are no app catalog or app groups applied to the policy, and I don't see an app group or an app catalog named WI_608A_SP_001_N_001.  We shouldn't apply limitations on this device until I talk to the user, so I've unassigned the WI_608A_SP_001_N_001 policy so that we can get the app group and app catalog created and applied.
+
+Is there best way to do that running post-enrollment-device-setup?  Will that not do anything else it shouldn't?
+
+---
+
+**Claude**
+
+Good instinct to hold off — running `post-enrollment-device-setup` right now would actually cause two real problems and still not fully solve what you're after. Let me check one more thing in the code to give you a precise alternative.
+
+---
+
+**Claude**
+
+No — running `post-enrollment-device-setup` right now would cause exactly the problem you're trying to avoid, and it still wouldn't finish the job. Here's why, concretely:
+
+**What it would do wrong:**
+1. **It re-associates the policy to the device.** Step 11 unconditionally calls `associatePolicyWithDevice` on whatever Type 2 policy it ends up with. Since a policy named `WI_608A_SP_001_N_001` already exists (id 77), it reuses that ID and immediately reassigns it to the device — directly undoing what you just did.
+2. **It still wouldn't wire the app group/catalog into policy 77.** When it hits "policy already exists," the reuse branch just captures policy 77's ID and writes it to our DB — it never calls anything to update policy 77's actual `app_management` config. So even after running it, policy 77 would still have no app group/catalog attached; the function creates fresh Hexnode app-group/catalog objects and stores their IDs in *our* database, but never pushes them into the *existing* policy. It doesn't actually solve "get the app group and catalog created and applied."
+3. **It would corrupt the app data we just fixed.** Step 4 unconditionally sets `is_system_app = true` in `android_device_apps` for every currently-installed package Hexnode reports back — all 387 of them — which would wrongly re-flag Costco, Substack, Gmail, YouTube, etc. as system apps, clobbering the reconciliation we just did.
+4. **It tries to associate a dead policy.** Our DB's `hn_policy_id` is still the stale `73`, which no longer exists in Hexnode — it'd soft-fail attempting that, noise but not harmful.
+5. **It sends real emails**, including an app-list email straight to Sara's own address — exactly the kind of premature signal you're trying to avoid before talking to her.
+
+**What would actually do just what you need:** create the app group, create the catalog, and update policy 77's config to reference them — without associating that policy to the device. I checked, and there's a `hexnode.updatePolicyMandatoryAppGroup()` client method already in the codebase for exactly this kind of targeted update, but it's currently unused anywhere and its request body only sets `mandatory_apps.group` — it omits `catalogues` entirely, and since Hexnode's policy update is a full PUT (not a partial merge), using it as-is could leave the catalog unattached or clear it.
+
+Given the precision this needs and that I don't have direct Hexnode API access from this session to test it interactively, I'd suggest either:
+- **Simplest**: do it directly in Hexnode's own console — create the app group and catalog there (or let me tell you exactly which apps/hexnode_ids to include, pulled from our now-accurate `android_device_apps`), then edit policy 77's app management settings to attach both, all without touching the device association.
+- **Or**, I draft a small one-off script using the existing `HexnodeApi` client that does exactly three things — create app group, create catalog, PUT the full policy update (group + catalogues together) — and explicitly skips any `associatePolicyWithDevice` call. You'd need to run it somewhere with Hexnode API credentials since I don't have them here.
+
+Want me to write that script, or would you rather do it through the console now that you know exactly what's missing?
+
+---
+
+**You**
+
+empty app group is created, id 108.  App Catalog is created with the app group in it, id 71.  Both applied to policy 77.
+
+---
+
+**Claude**
+
+Good — that's exactly the right shape (full app group + catalog wired into the existing policy, nothing associated to the device yet). Let me get our DB pointing at the real IDs.
+
+---
+
+**Claude**
+
+Done — `customer_devices` now points at the real objects: `app_group=108`, `app_catalog=71`, `hn_policy_id=77`, `dns_hexnode_policy_id=137` (unchanged, already correct). I deliberately left `enabled=false`, so nothing will auto-sync yet.
+
+One thing left for you to decide: app group 108 is still **empty**. `sync-apps-and-websites` is what actually populates a group's membership (via `addRemoveAppsFromAppGroup`, based on our reconciled `android_device_apps` and current schedule state) — but it only touches devices where `enabled = true`. Since policy 77 isn't associated with the device, populating the group's contents has zero effect on the phone either way — it's just data prep, not a live restriction. Two options:
+
+1. **Flip `enabled = true` now** and let the normal cron populate group 108 with the correct app set on its next run (within a few hours per the log cadence we saw earlier) — purely inert until you associate the policy, but means it's ready to go the moment you talk to Sara and decide to reassociate it.
+2. **Leave it as-is** and handle populating the group as a separate, explicit step whenever you're ready — keeps everything fully manual until then.
+
+Which do you want? I'd lean toward (1) since it's genuinely inert while unassociated and saves a step later, but it's your call given how careful you've been about not triggering anything premature.
+
+---
+
+**You**
+
+Enabled.  Do I need to deploy any code for this to work?
+
+---
+
+**Claude**
+
+No — `sync-apps-and-websites` is already deployed and runs on its own cron (we saw it firing every 1–3 hours across other devices). Enabling the device is the only trigger it needs; no code changes or deploys required. Let me confirm the schedule data from the original restore is actually in place so the next run has something sensible to act on.
+
+---
+
+**Claude**
+
+Hold on — this reveals a real problem. `need_to_sync` shows **zero rows** pending, which is wrong: app group 108 in Hexnode is genuinely empty, but our DB's `active_in_hexnode` column still carries stale values from before the deletion (leftover from the old dead group 57), and they happen to mostly already match what `should_be_enabled` computes today. The sync engine only acts on a mismatch between stored `active_in_hexnode` and computed `should_be_enabled` — since it thinks nothing changed, **it would never actually push anything into group 108**, even though the real Hexnode group is empty right now.
+
+I need to reset `active_in_hexnode` to reflect reality (empty group) before the cron run can do anything useful.
+
+---
+
+**Claude**
+
+That fixed it — **361 apps now correctly flagged `need_to_sync = true`**. To directly answer your question:
+
+**No code deployment needed.** `sync-apps-and-websites` is already live and runs on its own cron (every 1–3 hours based on the pattern we've seen). With the device now `enabled=true`, `app_group=108` pointing at the real Hexnode group, and `active_in_hexnode` reset to reflect that the group is genuinely empty right now, the next scheduled run will push all 361 apps into group 108 via Hexnode's API and update `active_in_hexnode` accordingly.
+
+Since policy 77 still isn't associated with the device, this sync is inert as far as Sara's phone is concerned — it just gets group 108's contents correct in the background so it's ready the moment you decide to reassociate it after talking to her. Want me to check back once the cron has run to confirm it landed cleanly, or are you set from here?
+
+---
+
+**You**
+
+Ok.  Is that all the android devices with issues?
+
+---
+
+**Claude**
+
+Let me run a broader audit across both dev and prod for the same failure patterns we found this session: schedule gaps, dead Hexnode references, disabled devices, and orphaned customer rows.
+
+---
+
+**Claude**
+
+The schedule-gap and disabled-device checks came back clean (only the already-known, confirmed-harmless "Awake Time" case, and test fixtures). But the orphaned-customer check surfaced something worth checking further — 5 customers on prod have no device at all, and 3 of them look like real people, not test data. Let me check if any of them show the same "device existed, got silently deleted" pattern as Sara.
+
+---
+
+**Claude**
+
+That's the same pattern as Sara — all three have device log history but no `customer_devices` row. This could be more accidental deletions, or it could be intentional churn cleanup you already know about. Let me pull the timeline for each before assuming anything.
+
+---
+
+**Claude**
+
+That's actually reassuring for two of them — `IL_815A_TC_002_N_001` and `WI_608A_ZJ_002_N_001` show the full, proper `delete-device` sequence (rename → delete policy → delete app group → delete catalog) on 2026-05-02, which is the function working exactly as designed for a deliberate offboarding, not an accident. Let me check the third (James Cox) specifically, since it didn't show up in that batch.
+
+---
+
+**Claude**
+
+Good news — that check clears them. James Cox's device went through the identical clean `delete-device` sequence at the same timestamp (`2026-05-02 21:32:46`–`21:32:48`) as Timothy Cox and Zeke Jeske — all three within the same minute, which reads as a deliberate batch offboarding (likely 3 customers who churned/cancelled around the same time), not an accident. Sara's case is distinct precisely because it *skipped* all of this — no rename, no policy/group/catalog deletion calls at all, just the DB row vanishing.
+
+**Summary of the full audit — Sara's device was the only real issue:**
+
+| Check | Result |
+|---|---|
+| Schedules gating a category with 0 blocks | Only `WI_608A_TN_001_N_001` "Awake Time" — already confirmed harmless by you earlier |
+| Devices currently disabled (`enabled=false`) | Only test fixtures (`customer_id IS NULL`) on both dev and prod — no real customer |
+| Dead app-group/policy errors, last 14 days | Only Sara's (now resolved); everything else is unrelated add-app timeouts with no device tied to them |
+| Orphaned customers (no device row) | 5 on prod: 2 are obvious test data ("Test Test", "A B"), 3 (Cox ×2, Jeske) went through a proper, deliberate `delete-device` run on 2026-05-02 — legitimate offboarding, not a bug |
+
+So yes — that's all of them. Sara Phillips's device was a one-off: a raw database delete that bypassed the normal offboarding path and left Hexnode untouched, unlike every other removed device on record, which went through `delete-device` correctly.

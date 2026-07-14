@@ -2157,3 +2157,41 @@ Same Hexnode device ID, completely different physical hardware, re-enrolled two 
 That also means our restored `android_device_apps` (431 rows) describes the **old Samsung's** app inventory, not this Pixel's — a lot of those package IDs (Samsung/Verizon-specific system apps) almost certainly don't exist on this phone at all, while genuinely new Pixel-specific ones are missing. A simple "add what's missing" isn't quite enough — we should probably also flag/remove the old-phone-only entries so category/schedule logic doesn't reference phantom apps. Want me to do both (add what's new, clean up what's stale), or just add for now and leave cleanup for later?
 
 Either way, your paste got cut off at 50,000 characters mid-`applications` array — I only have a partial list. Could you save the full API response to a file (e.g. in `C:\Users\JEREMI~1\AppData\Local\Temp\claude\c--Git-AprilAire-BI\b864b6c2-ceaa-47a5-adbf-697dab5165b1\scratchpad`) so I can read the whole thing? I don't want to reconcile the app table off a truncated list.
+
+---
+
+**You**
+
+Here's the full response.  Go ahead and bring her device and app list up to date in Supabase main.
+
+---
+
+**Claude**
+
+This response includes a `policies` array too — and it reveals something important: **a policy named `WI_608A_SP_001_N_001` (id 77) already exists and is actively associated with the device**, along with `ME_SM` (id 137, our DNS policy). That's a different ID than the stale `hn_policy_id=73` in our DB — someone already got partway through recreating the policy before the reconnect stalled. I'll factor that into the Hexnode-side fix later; for now, let's do exactly what you asked — bring the database (device metadata + app inventory) up to date from this live snapshot.
+
+Let me process the full app list programmatically rather than transcribing 300+ entries by hand.
+
+---
+
+**Claude**
+
+Now executing all three updates against main.
+
+---
+
+**Claude**
+
+All three updates landed cleanly. Let me verify the final count matches the live device exactly.
+
+---
+
+**Claude**
+
+**Database is now up to date.**
+
+- **Device metadata** corrected: `imei` → `355522574747089`, `serial` → `41030DLJG001JC`, `model_name` → `Pixel 8 Pro`, `manufacturer` → `Google`, `os_version` → `16`, `phone_number` → `6082281627`, `enrolled_timestamp` → `2025-12-20` (matching the actual Hexnode enrollment date, not the old Samsung's).
+- **App inventory reconciled** against the live Hexnode payload: **22 apps added** (Costco, Substack, Google Authenticator, and a batch of Pixel/Android-16-specific and Hexnode-agent system components — classified `is_system_app` using a name-vs-package-id heuristic that I validated against all 365 overlapping apps with **zero mismatches** before trusting it on the new ones), and **66 apps marked `is_deleted`** — these were Samsung/Motorola system bloat and carrier apps (AT&T, T-Mobile, Boost, Cricket, US Cellular, Verizon) plus real apps Sara had on the old phone (Fitbit, LastPass, Facebook, Citi Mobile, Zillow, Cash App, Zoom, etc.) that don't exist on this Pixel.
+- **active_apps = 387**, exactly matching the live Hexnode payload's app count. `total_rows = 453` (387 active + 66 soft-deleted, kept for history rather than hard-deleted).
+
+Database side is done. Still outstanding, whenever you're ready: reconnecting the Hexnode app group/policy (recall policy `WI_608A_SP_001_N_001` already exists as id 77 and is actively associated — someone got partway through before it stalled), and flipping `enabled` back to `true` once that's sorted.

@@ -617,3 +617,1543 @@ Two things need to happen, in order:
 This second step makes several real, live Hexnode API calls against Sara's actual phone (rename, create app groups/catalog/policy, associate policies) — I want your explicit go-ahead before I trigger it, and I'd need that Hexnode device ID from you to do it at all. Once both are done I'll also flip `enabled` back to `true` (it's currently `false` — the circuit breaker tripped after the app-group-57 failures).
 
 Want me to go ahead and fix the `imei` field now while you grab the Hexnode device ID?
+
+---
+
+**You**
+
+What will happen with step 2 if the policies in question already exist?
+
+---
+
+**Claude**
+
+Good question — the answer differs by object type, and there's a real edge case worth flagging. Let me check the actual `createAppGroup`/`createAppCatalog`/`createPolicy` implementations to see exactly how each handles a name collision.
+
+---
+
+**Claude**
+
+Depends on which object and whether Hexnode still has it "active" vs. merely archived — and this actually resolves your new requirement too, so let me cover both.
+
+**Idempotency by object type**, from the actual code:
+
+- **App groups & app catalog** (steps 7–9): `createAppGroup`/`createAppCatalog` POST first; if Hexnode replies "name already exists," they call `listAppGroups()`/`listAppCatalogs()` to find the existing one **by name** and reuse its ID, syncing in any missing apps. Safe and idempotent — *if* the existing object is active.
+- **Policy** (step 10): same pattern via `listPolicies()`, with an explicit 409 error message if it can't find an active match.
+
+**The catch, in both cases:** those lookup lists only return *active* Hexnode objects. Our own `delete-device` code has a comment about this exact behavior for policies: *"Hexnode archives rather than truly deletes, leaving the original name reserved and blocking re-enrollment."* If that's what happened here (rather than a true delete), Hexnode will still reject the create as a duplicate name, but the reuse-lookup won't find it in the active list — so it throws instead of recovering. For the policy that's a clean 409 you'd see clearly; for the app group/catalog it's a raw thrown error, and whatever steps already succeeded before the failure (e.g., the rename, or one of the two app groups) will have already been written to the DB, leaving the device partially reconnected.
+
+Given the app group is *confirmed* dead by ID (`"AppGroup does not exists with id /57/"`) but we don't know if it's truly gone or archived-with-name-reserved, I'd suggest checking Hexnode's console for any archived group/catalog/policy still named `WI_608A_SP_001_N_001` or `WI_608A_SP_001_N_001_initial_push` before we run this, and purging them if Hexnode's UI allows it — that avoids the failure mode entirely rather than us discovering it mid-run.
+
+**On your new point** — apps installed while the device was missing from the DB: good news, `post-enrollment-device-setup` already covers this. Step 1 fetches the device's *live* installed-app list straight from Hexnode; steps 4–5 correct `is_system_app` and register (via `add-apps`) any package not already in `android_device_apps`. So running this same call handles that automatically — no separate step needed, as long as it completes successfully.
+
+---
+
+**You**
+
+Ok.  Let's start by updating our database.  Here is the response to the device details api, which lists her apps.
+
+{
+    "id": 8,
+    "udid": "9ffa9c21a89d094a",
+    "platform": "android",
+    "owned_by": 2,
+    "enrollment_status": "enrolled",
+    "enrolled_time": "2025-12-20T01:31:57.594319Z",
+    "agent_active": true,
+    "lastreported": "2026-07-14T13:52:44.290499Z",
+    "lastscanned": "2026-07-14T06:06:23.603959Z",
+    "lastnotified": "2026-07-14T13:52:41.053263Z",
+    "remarks": "Successfully Enrolled",
+    "disenrolled_time": null,
+    "location_tracking_disabled": false,
+    "location_tracking_interval": 60,
+    "lostmode": false,
+    "last_location": " 914 Dane Street Burr Oaks Madison",
+    "latitude": "43.0435967",
+    "longitude": "-89.398416",
+    "last_location_time": "2026-07-14T13:43:46.552000Z",
+    "user": {
+        "id": 1,
+        "name": "Default User",
+        "email": null,
+        "phoneno": null,
+        "alternate_email": "jr2@mylizard.net"
+    },
+    "device": {
+        "device_name": "355522574747089",
+        "description": null,
+        "os_version": "16",
+        "os_name": "Android",
+        "build_version": "CP1A.260505.005",
+        "model_name": "Pixel 8 Pro",
+        "model": "Pixel 8 Pro",
+        "product_name": "Google",
+        "device_type": "smartphone",
+        "manufacture": "Google",
+        "serial_number": "41030DLJG001JC",
+        "storage": null,
+        "device_capacity": 109.65625,
+        "available_device_capacity": 61.119140625,
+        "used_device_capacity": 48.537109375,
+        "battery_level": 25,
+        "imei_1": "355522574747089",
+        "imei_2": "355522574747097",
+        "phoneno_1": "16082281627",
+        "phoneno_2": "",
+        "meid": "",
+        "modem_firmware_version": null,
+        "is_supervised": null,
+        "wifi_ssid": "UniFi",
+        "wifi_mac": "94:45:60:55:34:37",
+        "ipaddress": "192.168.1.249",
+        "iccid": "89014107334651846735",
+        "is_kiosk": false
+    },
+    "network": {
+        "wifi_ssid": "UniFi",
+        "wifi_mac": "94:45:60:55:34:37",
+        "ipaddress": "192.168.1.249",
+        "iccid": "89014107334651846735",
+        "imei_1": "355522574747089",
+        "imei_2": "355522574747097",
+        "phoneno_1": "16082281627",
+        "phoneno_2": "",
+        "ethernet_mac": "",
+        "bluetooth_mac": "",
+        "network_name": null,
+        "local_host_name": null,
+        "bluetooth_state": null,
+        "bluetooth_discoverable_mode": null,
+        "bluetooth_firm_version": null,
+        "imsi_1": "310410465185120",
+        "is_roaming_sim_1": false,
+        "imsi_2": null,
+        "is_roaming_sim_2": null,
+        "sim_carrier_network": "Boost",
+        "subscriber_carrier_network": null,
+        "current_carrier_network": "Boost",
+        "carrier_setting_network": null,
+        "roaming_enabled": null,
+        "is_roaming": false,
+        "international_data_roaming": null,
+        "home_carrier": null,
+        "home_country": null,
+        "current_carrier": null,
+        "current_country": null,
+        "network_type": "13",
+        "last_connected_date": "2026-07-14",
+        "ethernet_ip": "",
+        "personal_hotspot_enabled": null,
+        "subscriber_mcc": "us",
+        "subscriber_mnc": "410",
+        "current_mcc": "us",
+        "current_mcc2": null,
+        "current_mnc": "410",
+        "current_mnc2": null,
+        "iccid2": null,
+        "current_carrier_network2": null,
+        "subscriber_carrier_network2": null,
+        "is_roaming_2": null,
+        "win_phone_no_1": null,
+        "win_imei_1": null,
+        "win_imsi_1": null,
+        "win_is_roaming_1": null,
+        "win_phone_no_2": null,
+        "win_imsi_2": null,
+        "win_imei_2": null,
+        "win_is_roaming_2": null,
+        "win_associated_wifi_ssid": null,
+        "win_associated_wifi_ip": null,
+        "win_wifi_mac_add": null,
+        "win_ethernet_mac_add1": null,
+        "win_ethernet_mac_add2": null,
+        "win_bluetooth_mac_add": null,
+        "win_bluetooth_device_name": null,
+        "public_ip_address": "12.74.222.77"
+    },
+    "applications": [
+        {
+            "id": 1699,
+            "name": "Android Developer Verifier",
+            "bundle_size": null,
+            "app_version": "1.0.804814953",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.verifier"
+        },
+        {
+            "id": 726,
+            "name": "Wallpapers",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.wallpaper"
+        },
+        {
+            "id": 1013,
+            "name": "com.google.ambient.streaming",
+            "bundle_size": null,
+            "app_version": "1.0.1131.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.ambient.streaming"
+        },
+        {
+            "id": 1091,
+            "name": "com.google.android.uvexposurereporter",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.uvexposurereporter"
+        },
+        {
+            "id": 1729,
+            "name": "GizmoHub",
+            "bundle_size": null,
+            "app_version": "9.3.8.201",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.vzw.gizmopal"
+        },
+        {
+            "id": 408,
+            "name": "com.android.providers.calendar",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.providers.calendar"
+        },
+        {
+            "id": 608,
+            "name": "Contacts",
+            "bundle_size": null,
+            "app_version": "4.82.29.936766038",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.contacts"
+        },
+        {
+            "id": 589,
+            "name": "com.android.bips",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.bips"
+        },
+        {
+            "id": 399,
+            "name": "com.android.internal.display.cutout.emulation.double",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.internal.display.cutout.emulation.double"
+        },
+        {
+            "id": 1014,
+            "name": "com.google.android.documentsui.theme.pixel",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.documentsui.theme.pixel"
+        },
+        {
+            "id": 628,
+            "name": "com.android.calllogbackup",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.calllogbackup"
+        },
+        {
+            "id": 708,
+            "name": "Android Auto",
+            "bundle_size": null,
+            "app_version": "17.1.662414-release",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.projection.gearhead"
+        },
+        {
+            "id": 1108,
+            "name": "com.google.android.overlay.googlewebview",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.overlay.googlewebview"
+        },
+        {
+            "id": 1093,
+            "name": "com.android.simappdialog.auto_generated_rro_product__",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.simappdialog.auto_generated_rro_product__"
+        },
+        {
+            "id": 651,
+            "name": "com.google.android.connectivity.resources",
+            "bundle_size": null,
+            "app_version": "S-initial",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.connectivity.resources"
+        },
+        {
+            "id": 663,
+            "name": "com.google.android.documentsui",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.documentsui"
+        },
+        {
+            "id": 1052,
+            "name": "com.android.systemui.clocks.bignum",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.systemui.clocks.bignum"
+        },
+        {
+            "id": 1053,
+            "name": "com.google.pixel.camera.services",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.pixel.camera.services"
+        },
+        {
+            "id": 1099,
+            "name": "com.android.safetyregulatoryinfo.auto_generated_rro_product__",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.safetyregulatoryinfo.auto_generated_rro_product__"
+        },
+        {
+            "id": 347,
+            "name": "Amazon Music: Songs & Podcasts",
+            "bundle_size": null,
+            "app_version": "26.22.1",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.amazon.mp3"
+        },
+        {
+            "id": 817,
+            "name": "Cube Escape Collection",
+            "bundle_size": null,
+            "app_version": "1.4.13",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "air.com.RustyLake.CubeEscapeCollection"
+        },
+        {
+            "id": 1112,
+            "name": "com.android.systemui.clocks.metro",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.systemui.clocks.metro"
+        },
+        {
+            "id": 329,
+            "name": "Microsoft Authenticator",
+            "bundle_size": null,
+            "app_version": "6.2606.4246",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.azure.authenticator"
+        },
+        {
+            "id": 792,
+            "name": "Android Switch",
+            "bundle_size": null,
+            "app_version": "1.0.833807547",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.restore"
+        },
+        {
+            "id": 738,
+            "name": "com.android.emergency",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.emergency"
+        },
+        {
+            "id": 936,
+            "name": "Pixel Camera Services",
+            "bundle_size": null,
+            "app_version": "3.1.843305793.11",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.camera.services"
+        },
+        {
+            "id": 1072,
+            "name": "com.google.android.apps.retaildemo.preload",
+            "bundle_size": null,
+            "app_version": "4.7.683446209",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.retaildemo.preload"
+        },
+        {
+            "id": 1790,
+            "name": "com.google.android.overlay.glanceablehubsettings2022",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.overlay.glanceablehubsettings2022"
+        },
+        {
+            "id": 561,
+            "name": "com.google.android.setupwizard",
+            "bundle_size": null,
+            "app_version": "236.829759469",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.setupwizard"
+        },
+        {
+            "id": 711,
+            "name": "com.google.android.apps.turbo",
+            "bundle_size": null,
+            "app_version": "1.27.0.935999332.release",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.turbo"
+        },
+        {
+            "id": 1075,
+            "name": "com.google.SSRestartDetector",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.SSRestartDetector"
+        },
+        {
+            "id": 1006,
+            "name": "com.google.android.overlay.pixelconfigcommon",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.overlay.pixelconfigcommon"
+        },
+        {
+            "id": 1111,
+            "name": "com.google.android.overlay.permissioncontroller",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.overlay.permissioncontroller"
+        },
+        {
+            "id": 1115,
+            "name": "com.google.android.hardwareinfo",
+            "bundle_size": null,
+            "app_version": "1.0.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.hardwareinfo"
+        },
+        {
+            "id": 979,
+            "name": "com.android.internal.display.cutout.emulation.avoidAppsInCutout",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.internal.display.cutout.emulation.avoidAppsInCutout"
+        },
+        {
+            "id": 405,
+            "name": "com.google.android.cellbroadcastservice",
+            "bundle_size": null,
+            "app_version": "R-initial",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.cellbroadcastservice"
+        },
+        {
+            "id": 1700,
+            "name": "Users",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.multiuser"
+        },
+        {
+            "id": 1355,
+            "name": "com.android.pixeldisplayservice",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.pixeldisplayservice"
+        },
+        {
+            "id": 990,
+            "name": "com.google.android.iwlan",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.iwlan"
+        },
+        {
+            "id": 951,
+            "name": "Android System SafetyCore",
+            "bundle_size": null,
+            "app_version": "1.0.925574157",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.safetycore"
+        },
+        {
+            "id": 856,
+            "name": "Wisconsin Magazine of History",
+            "bundle_size": null,
+            "app_version": "25.2.13",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.audiencemedia.app1322"
+        },
+        {
+            "id": 1031,
+            "name": "com.google.android.systemui.overlay.pixelbatteryhealthconfig",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.systemui.overlay.pixelbatteryhealthconfig"
+        },
+        {
+            "id": 1039,
+            "name": "com.google.android.apps.internal.betterbug",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.internal.betterbug"
+        },
+        {
+            "id": 907,
+            "name": "Personal Safety",
+            "bundle_size": null,
+            "app_version": "2026.06.11.930408383.0-release",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.safetyhub"
+        },
+        {
+            "id": 1058,
+            "name": "com.google.android.apps.privacy.wildlife",
+            "bundle_size": null,
+            "app_version": "1.0.703309715",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.privacy.wildlife"
+        },
+        {
+            "id": 1067,
+            "name": "com.google.android.storagemanager.auto_generated_rro_product__",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.storagemanager.auto_generated_rro_product__"
+        },
+        {
+            "id": 654,
+            "name": "com.google.android.feedback",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.feedback"
+        },
+        {
+            "id": 576,
+            "name": "com.android.providers.settings.auto_generated_rro_product__",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.providers.settings.auto_generated_rro_product__"
+        },
+        {
+            "id": 1360,
+            "name": "com.google.android.settings.intelligence",
+            "bundle_size": null,
+            "app_version": "1.1.0.937862210.sr",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.settings.intelligence"
+        },
+        {
+            "id": 610,
+            "name": "com.android.server.telecom",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.server.telecom"
+        },
+        {
+            "id": 130,
+            "name": "Google Chrome",
+            "bundle_size": null,
+            "app_version": "150.0.7871.64",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.chrome"
+        },
+        {
+            "id": 1049,
+            "name": "com.android.telephony.imsmedia",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.telephony.imsmedia"
+        },
+        {
+            "id": 1582,
+            "name": "com.google.android.apps.magicportrait",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.magicportrait"
+        },
+        {
+            "id": 938,
+            "name": "Android AICore",
+            "bundle_size": null,
+            "app_version": "0.release.prod_aicore_20260528.01_RC08.934495584",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.aicore"
+        },
+        {
+            "id": 593,
+            "name": "com.google.android.captiveportallogin",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.captiveportallogin"
+        },
+        {
+            "id": 752,
+            "name": "YouTube Music",
+            "bundle_size": null,
+            "app_version": "9.26.55",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.youtube.music"
+        },
+        {
+            "id": 1020,
+            "name": "com.google.android.settings.overlay.pixelvpnconfig",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.settings.overlay.pixelvpnconfig"
+        },
+        {
+            "id": 986,
+            "name": "com.android.intentresolver",
+            "bundle_size": null,
+            "app_version": "2021-11",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.intentresolver"
+        },
+        {
+            "id": 1701,
+            "name": "com.google.android.verifier.overlay",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.verifier.overlay"
+        },
+        {
+            "id": 1082,
+            "name": "com.google.android.apps.pixel.relationships",
+            "bundle_size": null,
+            "app_version": "STUB",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.pixel.relationships"
+        },
+        {
+            "id": 1010,
+            "name": "com.google.android.federatedcompute",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.federatedcompute"
+        },
+        {
+            "id": 501,
+            "name": "com.android.internal.display.cutout.emulation.hole",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.internal.display.cutout.emulation.hole"
+        },
+        {
+            "id": 779,
+            "name": "com.android.providers.contacts",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.providers.contacts"
+        },
+        {
+            "id": 643,
+            "name": "com.android.proxyhandler",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.proxyhandler"
+        },
+        {
+            "id": 984,
+            "name": "android.auto_generated_characteristics_rro",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "android.auto_generated_characteristics_rro"
+        },
+        {
+            "id": 530,
+            "name": "com.android.backupconfirm",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.backupconfirm"
+        },
+        {
+            "id": 311,
+            "name": "Hexnode MDM Remote View",
+            "bundle_size": null,
+            "app_version": "6.4",
+            "mandatory_app": true,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.hexnode.hexnoderemote"
+        },
+        {
+            "id": 1073,
+            "name": "com.android.role.notes.enabled",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.role.notes.enabled"
+        },
+        {
+            "id": 1048,
+            "name": "com.google.euiccpixel",
+            "bundle_size": null,
+            "app_version": "D.2.0.18 (14341307)",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.euiccpixel"
+        },
+        {
+            "id": 974,
+            "name": "com.android.captiveportallogin.overlay",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.captiveportallogin.overlay"
+        },
+        {
+            "id": 1342,
+            "name": "com.google.android.flipendo.auto_generated_rro_product__",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.flipendo.auto_generated_rro_product__"
+        },
+        {
+            "id": 1120,
+            "name": "com.android.systemui.accessibility.accessibilitymenu",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.systemui.accessibility.accessibilitymenu"
+        },
+        {
+            "id": 1064,
+            "name": "com.google.android.apps.dreamliner",
+            "bundle_size": null,
+            "app_version": "2.2.0.834194002",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.dreamliner"
+        },
+        {
+            "id": 737,
+            "name": "com.google.android.apps.carrier.carrierwifi",
+            "bundle_size": null,
+            "app_version": "1.7.0.929007131",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.carrier.carrierwifi"
+        },
+        {
+            "id": 952,
+            "name": "Voice Access",
+            "bundle_size": null,
+            "app_version": "17.0.896515536",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.accessibility.voiceaccess"
+        },
+        {
+            "id": 2101,
+            "name": "Connected Phone & Watch services",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.crossdeviceaccessservice"
+        },
+        {
+            "id": 1104,
+            "name": "com.verizon.services",
+            "bundle_size": null,
+            "app_version": "3.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.verizon.services"
+        },
+        {
+            "id": 1023,
+            "name": "com.google.android.wifi.resources.pixel",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.wifi.resources.pixel"
+        },
+        {
+            "id": 482,
+            "name": "com.google.android.providers.media.module",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.providers.media.module"
+        },
+        {
+            "id": 1042,
+            "name": "com.google.pixel.digitalkey.timesync",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.pixel.digitalkey.timesync"
+        },
+        {
+            "id": 906,
+            "name": "Pixel Thermometer",
+            "bundle_size": null,
+            "app_version": "1.0.889172071",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.pixel.health"
+        },
+        {
+            "id": 325,
+            "name": "Google Authenticator",
+            "bundle_size": null,
+            "app_version": "7.1",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.authenticator2"
+        },
+        {
+            "id": 509,
+            "name": "Android Accessibility Suite",
+            "bundle_size": null,
+            "app_version": "16.0.0.777931756",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.marvin.talkback"
+        },
+        {
+            "id": 1035,
+            "name": "com.google.android.carrierlocation",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.carrierlocation"
+        },
+        {
+            "id": 1344,
+            "name": "com.google.android.apps.customization.pixel",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.customization.pixel"
+        },
+        {
+            "id": 983,
+            "name": "com.android.devicediagnostics.auto_generated_rro_vendor__",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.devicediagnostics.auto_generated_rro_vendor__"
+        },
+        {
+            "id": 334,
+            "name": "Amazon Kindle: Reading App",
+            "bundle_size": null,
+            "app_version": "8.151.0.100(2.0.87334.0)",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.amazon.kindle"
+        },
+        {
+            "id": 3262,
+            "name": "Substack",
+            "bundle_size": null,
+            "app_version": "2.106.1",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.substack.app"
+        },
+        {
+            "id": 851,
+            "name": "Soundcore",
+            "bundle_size": null,
+            "app_version": "5.0.13",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.oceanwing.soundcore"
+        },
+        {
+            "id": 2103,
+            "name": "com.google.android.crossdeviceaccessservice.auto_generated_rro_vendor__",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.crossdeviceaccessservice.auto_generated_rro_vendor__"
+        },
+        {
+            "id": 1904,
+            "name": "Glasses Core",
+            "bundle_size": null,
+            "app_version": "0.0.0.251110020",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.glasses.core"
+        },
+        {
+            "id": 980,
+            "name": "com.android.devicediagnostics",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.devicediagnostics"
+        },
+        {
+            "id": 745,
+            "name": "com.google.android.gms.location.history",
+            "bundle_size": null,
+            "app_version": "1.2",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.gms.location.history"
+        },
+        {
+            "id": 736,
+            "name": "com.android.providers.userdictionary",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.providers.userdictionary"
+        },
+        {
+            "id": 3263,
+            "name": "Costco",
+            "bundle_size": null,
+            "app_version": "26.6.4",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.costco.app.android"
+        },
+        {
+            "id": 1005,
+            "name": "com.google.android.apps.cbrsnetworkmonitor",
+            "bundle_size": null,
+            "app_version": "24.1.721121105",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.cbrsnetworkmonitor"
+        },
+        {
+            "id": 634,
+            "name": "Google TV",
+            "bundle_size": null,
+            "app_version": "4.39.3896.837424156.1-release",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.videos"
+        },
+        {
+            "id": 1057,
+            "name": "com.google.android.nfc.overlay.common",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.nfc.overlay.common"
+        },
+        {
+            "id": 1051,
+            "name": "com.google.android.connectivitythermalpowermanager",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.connectivitythermalpowermanager"
+        },
+        {
+            "id": 1074,
+            "name": "com.google.android.carriersetup",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.carriersetup"
+        },
+        {
+            "id": 582,
+            "name": "com.android.inputdevices",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.inputdevices"
+        },
+        {
+            "id": 494,
+            "name": "Google Play Services for AR",
+            "bundle_size": null,
+            "app_version": "1.55.261550593",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.ar.core"
+        },
+        {
+            "id": 994,
+            "name": "com.google.android.apps.scone",
+            "bundle_size": null,
+            "app_version": "p.2026.20",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.scone"
+        },
+        {
+            "id": 1852,
+            "name": "Custom Icons",
+            "bundle_size": null,
+            "app_version": "2026.01.07.853076941.0-release",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.apps.ai.icons"
+        },
+        {
+            "id": 893,
+            "name": "Sound Amplifier",
+            "bundle_size": null,
+            "app_version": "4.91.886631805",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.accessibility.soundamplifier"
+        },
+        {
+            "id": 831,
+            "name": "Libby: Read Library Books",
+            "bundle_size": null,
+            "app_version": "9.4.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.overdrive.mobile.android.libby"
+        },
+        {
+            "id": 684,
+            "name": "com.android.imsserviceentitlement",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.imsserviceentitlement"
+        },
+        {
+            "id": 498,
+            "name": "com.android.simappdialog",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.simappdialog"
+        },
+        {
+            "id": 524,
+            "name": "com.android.egg",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.egg"
+        },
+        {
+            "id": 1539,
+            "name": "com.google.android.soundpicker",
+            "bundle_size": null,
+            "app_version": "3.3 (825845788)",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.soundpicker"
+        },
+        {
+            "id": 991,
+            "name": "com.google.android.pixel.setupwizard",
+            "bundle_size": null,
+            "app_version": "1.36.834129332",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.pixel.setupwizard"
+        },
+        {
+            "id": 1704,
+            "name": "PixelSetupWizardOverlayExpressive",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.pixel.setupwizard.overlay.expressive"
+        },
+        {
+            "id": 1047,
+            "name": "com.google.android.pixel.avatarpicker",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.pixel.avatarpicker"
+        },
+        {
+            "id": 617,
+            "name": "com.google.android.packageinstaller",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.packageinstaller"
+        },
+        {
+            "id": 1002,
+            "name": "com.android.sdm.plugins.diagmon",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.sdm.plugins.diagmon"
+        },
+        {
+            "id": 1060,
+            "name": "com.google.android.avatarpicker",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.avatarpicker"
+        },
+        {
+            "id": 1102,
+            "name": "android.autoinstalls.config.google.nexus",
+            "bundle_size": null,
+            "app_version": "1",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "android.autoinstalls.config.google.nexus"
+        },
+        {
+            "id": 541,
+            "name": "Android System Intelligence",
+            "bundle_size": null,
+            "app_version": "B.26.playstore.pixel8.940155965",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.as"
+        },
+        {
+            "id": 985,
+            "name": "com.android.angle",
+            "bundle_size": null,
+            "app_version": "100",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.angle"
+        },
+        {
+            "id": 333,
+            "name": "Audible: Audiobooks & Podcasts",
+            "bundle_size": null,
+            "app_version": "26.25.07",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.audible.application"
+        },
+        {
+            "id": 764,
+            "name": "com.android.traceur",
+            "bundle_size": null,
+            "app_version": "1.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.android.traceur"
+        },
+        {
+            "id": 839,
+            "name": "NYTimes: US and Global News",
+            "bundle_size": null,
+            "app_version": "11.82.0",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.nytimes.android"
+        },
+        {
+            "id": 620,
+            "name": "Google Play services",
+            "bundle_size": null,
+            "app_version": "26.25.32 (260400-944114241)",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "com.google.android.gms"
+        },
+        {
+            "id": 1092,
+            "name": "com.google.RilConfigService",
+            "bundle_size": null,
+            "app_version": "16",
+            "mandatory_app": false,
+            "black_listed": false,
+            "managed": false,
+            "status": "Installed",
+            "identifier": "c
+
+[Message truncated - exceeded 50,000 character limit]
+
+---
+
+**Claude**
+
+This response actually resolves the bigger mystery — and changes the plan. Look at `"id": 8` in that payload: **Hexnode device ID 8 is the same one already stored in our DB as `mdm_vendor_id`.** It wasn't deleted or replaced — the same Hexnode enrollment record got reassigned to new hardware. Compare to what we restored:
+
+| Field | Our restored DB (old snapshot) | Live Hexnode right now |
+|---|---|---|
+| Model | Samsung SM-S127DL | **Google Pixel 8 Pro** |
+| Serial | R58RB0XZD4E | 41030DLJG001JC |
+| IMEI | 350214925992706 | 355522574747089 |
+| Enrolled | 2025-12-05 | 2025-12-20 |
+
+Same Hexnode device ID, completely different physical hardware, re-enrolled two weeks later. So this wasn't really "Hexnode wiped and orphaned" — it was a **phone swap**: Sara got a new Pixel, someone reassigned the existing Hexnode device slot to it, cleaned up the old app group/policy along the way (explaining the dead `app_group=57`), and then the process stalled before a new app group/policy got created — and somewhere in there the DB row also got deleted. `mdm_vendor_id='8'` was actually correct all along; we just need `imei`/`serial`/`model_name`/`manufacturer`/`os_version` corrected to the Pixel's values.
+
+That also means our restored `android_device_apps` (431 rows) describes the **old Samsung's** app inventory, not this Pixel's — a lot of those package IDs (Samsung/Verizon-specific system apps) almost certainly don't exist on this phone at all, while genuinely new Pixel-specific ones are missing. A simple "add what's missing" isn't quite enough — we should probably also flag/remove the old-phone-only entries so category/schedule logic doesn't reference phantom apps. Want me to do both (add what's new, clean up what's stale), or just add for now and leave cleanup for later?
+
+Either way, your paste got cut off at 50,000 characters mid-`applications` array — I only have a partial list. Could you save the full API response to a file (e.g. in `C:\Users\JEREMI~1\AppData\Local\Temp\claude\c--Git-AprilAire-BI\b864b6c2-ceaa-47a5-adbf-697dab5165b1\scratchpad`) so I can read the whole thing? I don't want to reconcile the app table off a truncated list.

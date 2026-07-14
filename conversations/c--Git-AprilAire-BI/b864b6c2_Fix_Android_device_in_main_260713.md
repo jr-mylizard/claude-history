@@ -573,3 +573,47 @@ This affects three places, all done the same way this session: Sara's device (pr
 All three fixed — 6 rows added each to schedule 67 (Sara, prod), 64 (JR, prod), and 12 (JR, dev), all `day_of_week` 1–6 with the same `00:00:00`–`00:00:00` sentinel. Each "Always" schedule now has 7 rows total, one per day, so it should render as a full-width all-day banner across the whole week on the calendar — refresh the frontend to confirm it now spans Mon–Sun instead of just Monday.
 
 No change to the sync-side behavior — `should_be_enabled` was already correct regardless of day, so this doesn't touch which apps are active, just fixes the visual.
+
+---
+
+**You**
+
+I think Sara's device might be 355522574747089 in Hexnode, which is Sara's phone's imei, but which doesn't match her user record which shows an imei of 350214925992706.
+
+Also, I'm getting this email error: 
+
+sync-apps-and-websites completed with 2 errors.
+Branch: https://gmovbfjefbxoiruomgum.supabase.co
+•	[android] Error syncing app group for device WI_608A_SP_001_N_001:
+•	[android] Unusual error returned by Hexnode API addRemoveAppsFromAppGroup method: {"status":400,"appGroupId":57,"responseBody":["AppGroup does not exists with id /57/"]}
+
+What's the best way to reconnect the hexnode device with Supabase?
+
+---
+
+**Claude**
+
+That error confirms something worse than "was never touched" — **the circuit breaker already tripped**: `enabled` flipped to `false` after 3 consecutive sync failures (I can see the exact error streak in `logging_sync_apps`, then a "success" entry with `app_group_id: null` once it dropped out of the desired-state view after being disabled). And Hexnode's own API is now telling us app group 57 genuinely doesn't exist. That contradicts my earlier read — I only proved our *automated* `delete-device` function never ran; I didn't account for someone cleaning things up manually in Hexnode's own console, which wouldn't show up in `logging_api_calls` at all.
+
+The IMEI mismatch you found is the key clue. Let me check what triggers fresh app-group/policy creation in this codebase, since that's probably the real fix rather than trying to resurrect dead IDs.
+
+---
+
+**Claude**
+
+Found the mechanism — `mdm_vendor_id` isn't something we should hand-set; it's written by `post-enrollment-device-setup`, which looks the device up **by IMEI** when Hexnode reports enrollment. That's exactly why the IMEI mismatch matters: as long as our `imei` is wrong, that lookup can never succeed. Let me check how the device-matching RPC works before proposing next steps, since I want to make sure fixing this doesn't accidentally spawn a duplicate device record.
+
+---
+
+**Claude**
+
+This is very actionable. `post-enrollment-device-setup` takes a **Hexnode device ID** (their internal integer ID, not the IMEI), fetches the device's IMEI directly from Hexnode itself, looks up our `customer_devices` row by that IMEI, and then fully rebuilds everything: writes `mdm_vendor_id`, renames the Hexnode device, creates a fresh `app_group_initial_push`, a fresh full `app_group`, a fresh `app_catalog`, a new permanent policy, and associates all of it — seeded from the `android_device_apps` (431 rows) we already restored. That's a complete "reconnect," not a patch.
+
+Two things need to happen, in order:
+
+1. **Fix `customer_devices.imei`** for `WI_608A_SP_001_N_001` to `355522574747089` first — the lookup in step 3 of `post-enrollment-device-setup` matches on IMEI, so it won't find our row until this is corrected. Plain SQL, no Hexnode calls, fully reversible.
+2. **Call `post-enrollment-device-setup`** with Sara's *Hexnode device ID* — the internal numeric ID Hexnode assigns to the device (different from the IMEI). I don't have Hexnode API/console access from here, so I can't look that up myself. Could you grab it from the Hexnode device detail page for IMEI `355522574747089` (it's usually in the URL or device info panel)?
+
+This second step makes several real, live Hexnode API calls against Sara's actual phone (rename, create app groups/catalog/policy, associate policies) — I want your explicit go-ahead before I trigger it, and I'd need that Hexnode device ID from you to do it at all. Once both are done I'll also flip `enabled` back to `true` (it's currently `false` — the circuit breaker tripped after the app-group-57 failures).
+
+Want me to go ahead and fix the `imei` field now while you grab the Hexnode device ID?

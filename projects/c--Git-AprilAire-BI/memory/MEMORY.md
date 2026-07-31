@@ -16,3 +16,5 @@
 - [Project: Enrollment Email](project_enrollment_email.md) — enrollment-summary.html moved to email_templates/ (underscore); Deno.readTextFile bundling hazard; follow-up is to inline as template literal
 - [Project: Playwright Suite](project_playwright_suite.md) — 55 E2E tests in MyLizard_NodeJS/tests/e2e/; iOS lifecycle ready now, Android lifecycle skip-guarded until PLAYWRIGHT_TEST_ANDROID_IMEI set (~2026-07-14)
 - [Project: Mosyle CDA Pipeline](project_mosyle_cda_pipeline.md) — render race (30s bounce fix), lpad truncation, "Installed" badge lies, free installs must use Playwright not App Store; cleanup list pending deploys
+- [Project: Fabric Capacity Investigation](project_fabric_capacity_investigation.md) — AprilAire BI ETL: Dataflow Gen2 found 4-7x more CU-costly than Copy Activity; DB2/iSeries now supported via Copy Activity+gateway; testing not yet started
+- [Project: Fabric Lakehouse Maintenance](project_fabric_lakehouse_maintenance.md) — AprilAire BI ETL: OPTIMIZE/VACUUM notebook loop plan for schema-less Lakehouse; Warehouse auto-compacts, Lakehouse doesn't

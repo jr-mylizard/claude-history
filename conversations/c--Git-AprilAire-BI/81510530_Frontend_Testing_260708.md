@@ -403,3 +403,32 @@ Here's what was built:
 - **Assert 4**: `app_store_should_be_enabled_until` unchanged
 - **Assert 5**: `mosyle_status` becomes `'added'` or `'not_found'` within 15 min — null at 15 min is an explicit failure
 - **Assert 6**: second add of the same app returns the same row ID and same slot
+
+---
+
+**You**
+
+How do we determine which devices are used for frontend testing?  I assume we need an android and an ios device, right?  Are those variables in .env?
+
+---
+
+**Claude**
+
+Let me check the env example, Playwright config, and how devices are referenced across the test suite.
+
+---
+
+**Claude**
+
+Yes, both iOS and Android. Everything is in `.env.test.local` (gitignored). From what's already filled in there:
+
+**iOS** — you have values set for all of these:
+- `PLAYWRIGHT_TEST_IOS_IMEI` / `PLAYWRIGHT_TEST_IOS_SERIAL` — used by the enrollment/lifecycle test to verify the device registers in Mosyle
+- `PLAYWRIGHT_TEST_IOS_DEVICE_ID` — DB row ID (`WI_608A_JR_001_P_001`) used by the CDA round-trip, integrity, tombstone, and add-app-contract tests to navigate the admin UI and read DB state
+- `PLAYWRIGHT_TEST_IOS_UDID` — Mosyle's own UDID, used for the Business API read-back calls (`getDeviceCdaValues`)
+
+**Android** — only `PLAYWRIGHT_TEST_ANDROID_IMEI`, currently blank (you noted "Available Monday"). The Android lifecycle spec is skip-guarded on that var so it's a no-op until you fill it in.
+
+**Not a physical device** — `PLAYWRIGHT_TEST_EMAIL` (`playwright-test@test.mylizard.net`) is the customer account the enrollment/add-app tests create records under. That's just a fixed test email, no device needed.
+
+The tests that hit the frontend (admin UI) all use `PLAYWRIGHT_TEST_IOS_DEVICE_ID` to build the URL path to that device's management page — so you only need the one test iPhone, and Android tests don't touch the UI yet.
